@@ -3,49 +3,52 @@ package nl.vroste.zio.kinesis.client.dynamicconsumer
 import io.github.vigoo.zioaws.cloudwatch.CloudWatch
 import io.github.vigoo.zioaws.core.AwsError
 import io.github.vigoo.zioaws.core.aspects.{ AwsCallAspect, Described }
-import io.github.vigoo.zioaws.kinesis.Kinesis
-import io.github.vigoo.zioaws.kinesis.model.{ ScalingType, UpdateShardCountRequest }
+import io.github.vigoo.zioaws.kinesis.{ model, Kinesis }
+import io.github.vigoo.zioaws.kinesis.model.{ PutRecordsRequest, ScalingType, UpdateShardCountRequest }
 import io.github.vigoo.zioaws.{ dynamodb, kinesis }
+import nl.vroste.zio.kinesis.client._
+import nl.vroste.zio.kinesis.client.dynamicconsumer.ExampleApp.{ enhancedFanout, streamName }
 import nl.vroste.zio.kinesis.client.localstack.LocalStackServices
 import nl.vroste.zio.kinesis.client.serde.Serde
 import nl.vroste.zio.kinesis.client.zionative.Consumer.InitialPosition
+import nl.vroste.zio.kinesis.client.zionative._
 import nl.vroste.zio.kinesis.client.zionative.leaserepository.DynamoDbLeaseRepository
 import nl.vroste.zio.kinesis.client.zionative.metrics.{ CloudWatchMetricsPublisher, CloudWatchMetricsPublisherConfig }
-import nl.vroste.zio.kinesis.client.zionative._
-import nl.vroste.zio.kinesis.client._
 import software.amazon.awssdk.http.SdkHttpConfigurationOption
 import software.amazon.awssdk.utils.AttributeMap
 import software.amazon.kinesis.exceptions.ShutdownException
+import zio._
 import zio.blocking.Blocking
 import zio.clock.Clock
-import zio.console.Console
+import zio.console.{ putStrLn, Console }
 import zio.duration._
 import zio.logging.{ log, Logging }
 import zio.random.Random
 import zio.stream.{ ZStream, ZTransducer }
-import zio._
+
+import java.nio.ByteBuffer
 
 /**
  * Runnable used for manually testing various features
  */
-object ExampleApp extends zio.App {
+object ExampleApp3 extends zio.App {
   val streamName                      = "mercury-invoice-generator-dev-stream-test"         // + java.util.UUID.randomUUID().toString
   val applicationName                 = "mercury-invoice-generator-kinesis-client-dev-test" // + java.util.UUID.randomUUID().toString(),
-  val nrRecords                       = 50000
+  val nrRecords                       = 10000
   val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
-  val nrShards                        = 2
+  val nrShards                        = 1
   val reshardFactor                   = 2
-  val reshardAfter: Option[Duration]  = Some(1.minute)                                      // Some(10.seconds)
+  val reshardAfter: Option[Duration]  = None                                                //Some(30.seconds)                                    // Some(10.seconds)
   val enhancedFanout                  = true
-  val nrNativeWorkers                 = 1
-  val nrKclWorkers                    = 0
-  val runtime                         = 2.minutes
+  val nrNativeWorkers                 = 0
+  val nrKclWorkers                    = 1
+  val runtime                         = 1.minute
   val maxRandomWorkerStartDelayMillis = 1 + 0 * 60 * 1000
   val recordProcessingTime: Duration  = 1.millisecond
 
   val producerSettings                = ProducerSettings(
-    aggregate = true,
+    aggregate = false,
     metricsInterval = 5.seconds,
     bufferSize = 8192 * 8,
     maxParallelRequests = 10
@@ -55,26 +58,27 @@ object ExampleApp extends zio.App {
     CloudWatchMetricsPublisherConfig
   ] with DynamicConsumer with LeaseRepository, Throwable, ExitCode] = {
     for {
-      _          <- TestUtil.createStreamUnmanaged(streamName, nrShards)
-      _          <- TestUtil.getShards(streamName)
-      producer   <- TestUtil
-                    .produceRecords(streamName, nrRecords, produceRate, recordSize, producerSettings)
-                    .tapError(e => log.error(s"Producer error: ${e}"))
-                    .fork
+      _              <- TestUtil.createStreamUnmanaged(streamName, nrShards)
+      _              <- TestUtil.getShards(streamName)
+      producer       <- FooUtils.putRecordsEmitter(streamName, 200, nrRecords).mapError(_.toThrowable).runDrain
+//      producer       <- TestUtil
+//                    .produceRecords(streamName, nrRecords, produceRate, recordSize, producerSettings)
+//                    .tapError(e => log.error(s"Producer error: ${e}"))
+//                    .fork
 //      _          <- producer.join
-      workers    <- ZIO.foreach(1 to nrNativeWorkers)(id => worker(s"worker${id}").runCount.fork)
-      kclWorkers <-
-        ZIO.foreach((1 + nrNativeWorkers) to (nrKclWorkers + nrNativeWorkers))(id =>
+      ref            <- Ref.make(0)
+      kclWorkers     <-
+        ZIO.foreach((1 to nrKclWorkers))(id =>
           (for {
             shutdown <- Promise.make[Nothing, Unit]
-            fib      <- kclWorker(s"worker${id}", shutdown).runDrain.forkDaemon
+            fib      <- kclWorker(ref, s"worker${id}", shutdown).forkDaemon
             _        <- ZIO.never.unit.ensuring(
                    log.warn(s"Requesting shutdown for worker worker${id}!") *> shutdown.succeed(()) <* fib.join.orDie
                  )
           } yield ()).fork
         )
       // Sleep, but abort early if one of our children dies
-      _          <- reshardAfter
+      _              <- reshardAfter
              .map(delay =>
                (log.info("Resharding") *>
                  kinesis.updateShardCount(
@@ -88,14 +92,15 @@ object ExampleApp extends zio.App {
              )
              .getOrElse(ZIO.unit)
              .fork
-      _          <- ZIO.sleep(runtime) raceFirst ZIO.foreachPar_(kclWorkers ++ workers)(_.join) raceFirst producer.join
-      _           = println("Interrupting app")
-      _          <- producer.interruptFork
-      _          <- ZIO.foreachPar_(kclWorkers)(_.interrupt)
-      _          <- ZIO.foreachPar_(workers)(_.interrupt.map { exit =>
-             exit.fold(_ => (), nrRecordsProcessed => println(s"Worker processed ${nrRecordsProcessed}"))
-
+      _              <- ZIO.sleep(runtime) raceFirst ZIO.foreachPar_(kclWorkers)(_.join) // raceFirst producer.join
+      _               = println("Interrupting app")
+//      _              <- producer.interruptFork
+      _               = println("YYYYYYYYYYYYYYY 1")
+      _              <- ZIO.foreachPar_(kclWorkers)(_.interrupt.map { exit =>
+             exit.fold(_ => (), _ => println("kcl worker exiting"))
            })
+      totalProcessed <- ref.get
+      _               = println(s"XXXXXXXXXXXXXXXXXXXXXXXX total processed $totalProcessed")
     } yield ExitCode.success
   }
   override def run(
@@ -105,68 +110,34 @@ object ExampleApp extends zio.App {
       .foldCauseM(e => log.error(s"Program failed: ${e.prettyPrint}", e).exitCode, ZIO.succeed(_))
       .provideCustomLayer(awsEnv)
 
-  def worker(id: String) =
-    ZStream.unwrapManaged {
-      for {
-        metrics <- CloudWatchMetricsPublisher.make(applicationName, id)
-        delay   <- zio.random.nextIntBetween(0, maxRandomWorkerStartDelayMillis).map(_.millis).toManaged_
-        _       <- log.info(s"Waiting ${delay.toMillis} ms to start worker ${id}").toManaged_
-      } yield ZStream.fromEffect(ZIO.sleep(delay)) *> Consumer
-        .shardedStream(
-          streamName,
-          applicationName = applicationName,
-          deserializer = Serde.asciiString,
-          workerIdentifier = id,
-          fetchMode = if (enhancedFanout) FetchMode.EnhancedFanOut() else FetchMode.Polling(batchSize = 1000),
-          initialPosition = InitialPosition.TrimHorizon,
-          emitDiagnostic = ev =>
-            (ev match {
-              case ev: DiagnosticEvent.PollComplete =>
-                log
-                  .info(
-                    id + s": PollComplete for ${ev.nrRecords} records of ${ev.shardId}, behind latest: ${ev.behindLatest.toMillis} ms (took ${ev.duration.toMillis} ms)"
-                  )
-                  .provideLayer(loggingLayer)
-              case ev                               => log.info(id + ": " + ev.toString).provideLayer(loggingLayer)
-            }) *> metrics.processEvent(ev)
-        )
-        .flatMapPar(Int.MaxValue) {
-          case (shardID, shardStream, checkpointer) =>
-            shardStream
-              .tap(r =>
-                checkpointer
-                  .stageOnSuccess(
-                    (log.info(s"${id} Processing record $r") *> ZIO
-                      .sleep(recordProcessingTime)
-                      .when(recordProcessingTime >= 1.millis)).when(false)
-                  )(r)
-              )
-              .aggregateAsyncWithin(ZTransducer.collectAllN(5000), Schedule.fixed(10.second))
-              .tap(rs => log.info(s"${id} processed ${rs.size} records on shard ${shardID}").when(true))
-              .mapError[Either[Throwable, ShardLeaseLost.type]](Left(_))
-              .tap(_ => checkpointer.checkpoint())
-              .catchAll {
-                case Right(ShardLeaseLost) =>
-                  ZStream.fromEffect(log.info(s"${id} Doing checkpoint for ${shardID}: shard lease lost")) *>
-                    ZStream.empty
-
-                case Left(e)               =>
-                  ZStream.fromEffect(
-                    log.error(s"${id} shard ${shardID} stream failed with " + e + ": " + e.getStackTrace)
-                  ) *> ZStream.fail(e)
-              }
-        }
-        .mapConcatChunk(identity)
-        .ensuring(log.info(s"Worker ${id} stream completed"))
-    }
-
   def kclWorker(
+    ref: Ref[Int],
     id: String,
     requestShutdown: Promise[Nothing, Unit]
-  ): ZStream[DynamicConsumer with Blocking with Logging with Clock with Random, Throwable, DynamicConsumer.Record[
-    String
-  ]] =
-    ZStream.fromEffect(
+  ): ZIO[Random with Any with Blocking with Logging with Clock with DynamicConsumer, Throwable, Int] =
+    for {
+      d              <- zio.random.nextIntBetween(0, 1000)
+      _              <- ZIO.sleep(d.millis)
+      _              <- DynamicConsumer.consumeWith(
+             streamName,
+             applicationName = applicationName,
+             deserializer = Serde.asciiString,
+             isEnhancedFanOut = enhancedFanout,
+             workerIdentifier = id,
+             requestShutdown = requestShutdown.await,
+             checkpointBatchSize = 200
+           ) { _ =>
+             ref.update(i => i + 1)
+           //log.info(s"processing record ${rec}")
+           }
+      totalProcessed <- ref.get
+    } yield totalProcessed
+
+  def kclWorker2(
+    id: String,
+    requestShutdown: Promise[Nothing, Unit]
+  ): ZIO[Logging with Blocking with Clock with DynamicConsumer with Any with Random, Throwable, Unit] =
+    (ZStream.fromEffect(
       zio.random.nextIntBetween(0, 1000).flatMap(d => ZIO.sleep(d.millis))
     ) *> DynamicConsumer
       .shardedStream(
@@ -197,7 +168,7 @@ object ExampleApp extends zio.App {
                   log.error(s"${id} shard ${shardID} stream failed with" + e + ": " + e.getStackTrace)
                 ) *> ZStream.fail(e)
             }
-      }
+      }).runDrain
 
   val loggingLayer: ZLayer[Any, Nothing, Logging] =
     (Console.live ++ Clock.live) >>> Logging.console() >>> Logging.withRootLoggerName(getClass.getName)
@@ -247,4 +218,42 @@ object ExampleApp extends zio.App {
 
     logging >+> awsClients >+> (dynamicConsumer ++ leaseRepo ++ metricsPublisherConfig)
   }
+}
+
+object FooUtils {
+  def makeRecord(i: Int, failIndex: Int = -1): String =
+    if (i == failIndex)
+      "DomainEventBad"
+    else
+      s"""{ "id": $i }"""
+
+  def putRecordsEmitter(
+    streamName: String,
+    batchSize: Int,
+    max: Int,
+    failIndex: Int = -1
+  ): ZStream[Console with Clock with Kinesis, AwsError, Int] =
+    ZStream.service[Kinesis.Service].flatMap { client =>
+      ZStream.unfoldM(0) { i =>
+        if (i < max) {
+          val recordsBatch =
+            (i until i + batchSize)
+              .map(batchIndex =>
+                model.PutRecordsRequestEntry(
+                  partitionKey = s"partitionKey$batchIndex",
+                  data = Chunk.fromByteBuffer(ByteBuffer.wrap(makeRecord(batchIndex, failIndex).getBytes))
+                )
+              )
+          val putRecordsM  = client
+            .putRecords(PutRecordsRequest(records = recordsBatch, streamName))
+          for {
+            _ <- putStrLn(s"i=$i putting $batchSize  records into Kinesis")
+            _ <- putRecordsM
+            _ <- putStrLn(s"successfully put records")
+          } yield Some((i, i + batchSize))
+        } else
+          ZIO.none
+      }
+    }
+
 }
