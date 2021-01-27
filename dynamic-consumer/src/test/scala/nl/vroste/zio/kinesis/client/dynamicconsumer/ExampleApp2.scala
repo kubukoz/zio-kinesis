@@ -31,16 +31,16 @@ import zio.stream.{ ZStream, ZTransducer }
 object ExampleApp2 extends zio.App {
   val streamName                      = "mercury-invoice-generator-dev-stream-test"         // + java.util.UUID.randomUUID().toString
   val applicationName                 = "mercury-invoice-generator-kinesis-client-dev-test" // + java.util.UUID.randomUUID().toString(),
-  val nrRecords                       = 50000
+  val nrRecords                       = 10000
   val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
   val nrShards                        = 1
   val reshardFactor                   = 2
-  val reshardAfter: Option[Duration]  = Some(60.seconds)                                    // Some(10.seconds)
+  val reshardAfter: Option[Duration]  = Some(1.minute)                                      // Some(10.seconds)
   val enhancedFanout                  = true
   val nrNativeWorkers                 = 0
   val nrKclWorkers                    = 1
-  val runtime                         = 2.minute
+  val runtime                         = 2.minutes
   val maxRandomWorkerStartDelayMillis = 1 + 0 * 60 * 1000
   val recordProcessingTime: Duration  = 1.millisecond
 
