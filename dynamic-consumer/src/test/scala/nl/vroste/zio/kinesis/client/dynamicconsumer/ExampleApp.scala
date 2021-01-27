@@ -31,7 +31,7 @@ import zio._
 object ExampleApp extends zio.App {
   val streamName                      = "mercury-invoice-generator-dev-stream-test"         // + java.util.UUID.randomUUID().toString
   val applicationName                 = "mercury-invoice-generator-kinesis-client-dev-test" // + java.util.UUID.randomUUID().toString(),
-  val nrRecords                       = 50000
+  val nrRecords                       = 10000
   val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
   val nrShards                        = 1
