@@ -34,18 +34,18 @@ object ExampleApp extends zio.App {
   val nrRecords                       = 50000
   val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
-  val nrShards                        = 2
+  val nrShards                        = 1
   val reshardFactor                   = 2
   val reshardAfter: Option[Duration]  = Some(1.minute)                                      // Some(10.seconds)
   val enhancedFanout                  = true
-  val nrNativeWorkers                 = 1
-  val nrKclWorkers                    = 0
+  val nrNativeWorkers                 = 0
+  val nrKclWorkers                    = 1
   val runtime                         = 2.minutes
   val maxRandomWorkerStartDelayMillis = 1 + 0 * 60 * 1000
   val recordProcessingTime: Duration  = 1.millisecond
 
   val producerSettings                = ProducerSettings(
-    aggregate = true,
+    aggregate = false,
     metricsInterval = 5.seconds,
     bufferSize = 8192 * 8,
     maxParallelRequests = 10

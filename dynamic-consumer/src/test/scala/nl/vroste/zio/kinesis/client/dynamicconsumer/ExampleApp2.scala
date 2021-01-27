@@ -45,7 +45,7 @@ object ExampleApp2 extends zio.App {
   val recordProcessingTime: Duration  = 1.millisecond
 
   val producerSettings                = ProducerSettings(
-    aggregate = true,
+    aggregate = false,
     metricsInterval = 5.seconds,
     bufferSize = 8192 * 8,
     maxParallelRequests = 10
@@ -67,7 +67,7 @@ object ExampleApp2 extends zio.App {
         ZIO.foreach((1 + nrNativeWorkers) to (nrKclWorkers + nrNativeWorkers))(id =>
           (for {
             shutdown <- Promise.make[Nothing, Unit]
-            fib      <- kclWorker(s"worker${id}", shutdown).forkDaemon
+            fib      <- kclWorkerOriginal(s"worker${id}", shutdown).runDrain.forkDaemon
             _        <- ZIO.never.unit.ensuring(
                    log.warn(s"Requesting shutdown for worker worker${id}!") *> shutdown.succeed(()) <* fib.join.orDie
                  )
@@ -91,10 +91,7 @@ object ExampleApp2 extends zio.App {
       _          <- ZIO.sleep(runtime) raceFirst ZIO.foreachPar_(kclWorkers ++ workers)(_.join) raceFirst producer.join
       _           = println("Interrupting app")
       _          <- producer.interruptFork
-      _          <- ZIO.foreachPar_(kclWorkers)(_.interrupt.map { exit =>
-             exit.fold(_ => (), nrRecordsProcessed => println(s"kcl Worker processed ${nrRecordsProcessed}"))
-           })
-      _           = println("post kclWorkers interrupt")
+      _          <- ZIO.foreachPar_(kclWorkers)(_.interrupt)
       _          <- ZIO.foreachPar_(workers)(_.interrupt.map { exit =>
              exit.fold(_ => (), nrRecordsProcessed => println(s"Native Worker processed ${nrRecordsProcessed}"))
            })
