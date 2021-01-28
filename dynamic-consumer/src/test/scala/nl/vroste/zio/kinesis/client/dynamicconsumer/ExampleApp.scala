@@ -31,7 +31,7 @@ import zio._
 object ExampleApp extends zio.App {
   val streamName                      = "mercury-invoice-generator-dev-stream-test"         // + java.util.UUID.randomUUID().toString
   val applicationName                 = "mercury-invoice-generator-kinesis-client-dev-test" // + java.util.UUID.randomUUID().toString(),
-  val nrRecords                       = 10000
+  val nrRecords                       = 30000                                               // at 10000 does not force reshard
   val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
   val nrShards                        = 1
@@ -45,7 +45,7 @@ object ExampleApp extends zio.App {
   val recordProcessingTime: Duration  = 1.millisecond
 
   val producerSettings                = ProducerSettings(
-    aggregate = false,
+    aggregate = true,
     metricsInterval = 5.seconds,
     bufferSize = 8192 * 8,
     maxParallelRequests = 10

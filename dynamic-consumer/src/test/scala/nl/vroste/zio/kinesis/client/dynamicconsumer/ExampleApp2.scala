@@ -67,7 +67,7 @@ object ExampleApp2 extends zio.App {
         ZIO.foreach((1 + nrNativeWorkers) to (nrKclWorkers + nrNativeWorkers))(id =>
           (for {
             shutdown <- Promise.make[Nothing, Unit]
-            fib      <- kclWorkerOriginal(s"worker${id}", shutdown).runDrain.forkDaemon
+            fib      <- kclWorker(s"worker${id}", shutdown).forkDaemon
             _        <- ZIO.never.unit.ensuring(
                    log.warn(s"Requesting shutdown for worker worker${id}!") *> shutdown.succeed(()) <* fib.join.orDie
                  )
