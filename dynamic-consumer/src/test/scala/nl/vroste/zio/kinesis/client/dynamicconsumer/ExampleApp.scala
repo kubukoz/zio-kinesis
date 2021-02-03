@@ -29,23 +29,23 @@ import zio._
  * Runnable used for manually testing various features
  */
 object ExampleApp extends zio.App {
-  val streamName                      = "zio-test-stream-6" // + java.util.UUID.randomUUID().toString
-  val applicationName                 = "testApp-10"        // + java.util.UUID.randomUUID().toString(),
-  val nrRecords                       = 300000
-  val produceRate                     = 200                 // Nr records to produce per second
+  val streamName                      = "mercury-invoice-generator-dev-stream-test"         // + java.util.UUID.randomUUID().toString
+  val applicationName                 = "mercury-invoice-generator-kinesis-client-dev-test" // + java.util.UUID.randomUUID().toString(),
+  val nrRecords                       = 30000
+  val produceRate                     = 200                                                 // Nr records to produce per second
   val recordSize                      = 50
-  val nrShards                        = 2
+  val nrShards                        = 1
   val reshardFactor                   = 2
-  val reshardAfter: Option[Duration]  = None                // Some(10.seconds)
+  val reshardAfter: Option[Duration]  = Some(1.minute)                                      // Some(10.seconds)
   val enhancedFanout                  = true
-  val nrNativeWorkers                 = 1
-  val nrKclWorkers                    = 0
+  val nrNativeWorkers                 = 0
+  val nrKclWorkers                    = 1
   val runtime                         = 10.minute
   val maxRandomWorkerStartDelayMillis = 1 + 0 * 60 * 1000
   val recordProcessingTime: Duration  = 1.millisecond
 
   val producerSettings                = ProducerSettings(
-    aggregate = true,
+    aggregate = false,
     metricsInterval = 5.seconds,
     bufferSize = 8192 * 8,
     maxParallelRequests = 10
@@ -55,6 +55,8 @@ object ExampleApp extends zio.App {
     CloudWatchMetricsPublisherConfig
   ] with DynamicConsumer with LeaseRepository, Throwable, ExitCode] = {
     for {
+      ref        <- Ref.make(0)
+      _           = println("XXXXXXXXXXXXXXXx starting program")
       _          <- TestUtil.createStreamUnmanaged(streamName, nrShards)
       _          <- TestUtil.getShards(streamName)
       producer   <- TestUtil
@@ -67,7 +69,7 @@ object ExampleApp extends zio.App {
         ZIO.foreach((1 + nrNativeWorkers) to (nrKclWorkers + nrNativeWorkers))(id =>
           (for {
             shutdown <- Promise.make[Nothing, Unit]
-            fib      <- kclWorker(s"worker${id}", shutdown).runDrain.forkDaemon
+            fib      <- kclWorker3(ref, s"worker${id}", shutdown).forkDaemon
             _        <- ZIO.never.unit.ensuring(
                    log.warn(s"Requesting shutdown for worker worker${id}!") *> shutdown.succeed(()) <* fib.join.orDie
                  )
@@ -96,6 +98,8 @@ object ExampleApp extends zio.App {
              exit.fold(_ => (), nrRecordsProcessed => println(s"Worker processed ${nrRecordsProcessed}"))
 
            })
+      total      <- ref.get
+      _          <- ZIO.succeed(println(s"Exiting application XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX total processed = $total"))
     } yield ExitCode.success
   }
   override def run(
@@ -159,6 +163,21 @@ object ExampleApp extends zio.App {
         .mapConcatChunk(identity)
         .ensuring(log.info(s"Worker ${id} stream completed"))
     }
+
+  def kclWorker3(
+    ref: Ref[Int],
+    id: String,
+    requestShutdown: Promise[Nothing, Unit]
+  ): ZIO[Any with Logging with Blocking with Clock with DynamicConsumer, Throwable, Unit] =
+    DynamicConsumer
+      .consumeWith(
+        streamName,
+        applicationName = applicationName,
+        deserializer = Serde.asciiString,
+        isEnhancedFanOut = enhancedFanout,
+        workerIdentifier = id,
+        requestShutdown = requestShutdown.await
+      )(record => ref.update(_ + 1) *> log.info(s"${id} Processing record $record").when(false))
 
   def kclWorker(
     id: String,

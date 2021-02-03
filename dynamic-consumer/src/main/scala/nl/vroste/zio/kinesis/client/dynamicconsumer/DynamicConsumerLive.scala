@@ -122,8 +122,10 @@ private[client] class DynamicConsumerLive(
         shardEndedInput.checkpointer().checkpoint()
       }
 
-      override def shutdownRequested(shutdownRequestedInput: ShutdownRequestedInput): Unit =
+      override def shutdownRequested(shutdownRequestedInput: ShutdownRequestedInput): Unit = {
         shardQueue.foreach(_.stop("shutdown requested"))
+        shutdownRequestedInput.checkpointer().checkpoint()
+      }
     }
 
     class Queues(
@@ -195,6 +197,7 @@ private[client] class DynamicConsumerLive(
             cloudWatchAsyncClient,
             workerIdentifier,
             new ZioShardProcessorFactory(queues)
+//            () => new ZioShardProcessor(queues)
           )
           leaseTableName.fold(configsBuilder)(configsBuilder.tableName)
         }
