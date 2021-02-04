@@ -90,7 +90,8 @@ object ExampleApp extends zio.App {
              )
              .getOrElse(ZIO.unit)
              .fork
-      _          <- ZIO.sleep(runtime) raceFirst ZIO.foreachPar_(kclWorkers ++ workers)(_.join) raceFirst producer.join
+      _          <- producer.join
+      _          <- ZIO.sleep(runtime) raceFirst ZIO.foreachPar_(kclWorkers ++ workers)(_.join) // raceFirst producer.join
       _           = println("Interrupting app")
       _          <- producer.interruptFork
       _          <- ZIO.foreachPar_(kclWorkers)(_.interrupt)
